@@ -11,157 +11,125 @@ red="\033[31m"
 yellow="\033[33m"
 plain="\033[0m"
 
-print_step() {
-    echo -e "${green}[✔] $1${plain}"
-}
+print_ok(){ echo -e "${green}[✔] $1${plain}"; }
+print_do(){ echo -e "${yellow}[➜] $1...${plain}"; }
+print_err(){ echo -e "${red}[✘] $1${plain}"; }
 
-print_doing() {
-    echo -e "${yellow}[➜] $1...${plain}"
+# ✅ 多源下载 + 重试
+download_file() {
+    URLS=(
+        "https://ghfast.top/https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-amd64.zip"
+        "https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-amd64.zip"
+    )
+
+    for url in "${URLS[@]}"; do
+        print_do "尝试下载: $url"
+        curl -L --retry 3 --connect-timeout 10 -o sb.zip "$url" && break
+    done
+
+    file sb.zip | grep -q "Zip archive" || return 1
 }
 
 install_core() {
-    mkdir -p $WORK_DIR
-    cd $WORK_DIR
+    mkdir -p $WORK_DIR && cd $WORK_DIR
 
-    print_doing "下载 sing-box"
-    wget -q --show-progress -O sb.zip https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-amd64.zip
+    print_do "安装 sing-box"
+    if ! download_file; then
+        print_err "sing-box 下载失败（网络问题）"
+        return 1
+    fi
+
     unzip -o sb.zip >/dev/null
     mv sing-box*/sing-box $SB
     chmod +x $SB
     rm -rf sb.zip sing-box*
-    print_step "sing-box 安装完成"
+    print_ok "sing-box OK"
 
-    print_doing "下载 cloudflared"
-    wget -q --show-progress -O $CF https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+    print_do "安装 cloudflared"
+    curl -L --retry 3 -o $CF https://ghfast.top/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
     chmod +x $CF
-    print_step "cloudflared 安装完成"
+    print_ok "cloudflared OK"
 }
 
 gen_config() {
-    print_doing "生成配置"
-
     UUID=$(cat /proc/sys/kernel/random/uuid)
 
     cat > $CONF <<EOF
 {
-  "inbounds":[
-    {
-      "type":"vless",
-      "listen":"0.0.0.0",
-      "listen_port":10000,
-      "users":[{"uuid":"$UUID"}],
-      "transport":{"type":"ws","path":"/ws"}
-    }
-  ],
-  "outbounds":[{"type":"direct"}]
+ "inbounds":[
+  {
+   "type":"vless",
+   "listen":"0.0.0.0",
+   "listen_port":10000,
+   "users":[{"uuid":"$UUID"}],
+   "transport":{"type":"ws","path":"/ws"}
+  }
+ ],
+ "outbounds":[{"type":"direct"}]
 }
 EOF
 
     echo $UUID > $WORK_DIR/uuid.txt
-    print_step "配置生成完成"
+    print_ok "配置生成完成"
 }
 
 create_keep() {
 cat > $WORK_DIR/keep.sh <<'EOF'
 #!/bin/bash
 DIR="$HOME/nat-proxy"
-SB="$DIR/sing-box"
-CF="$DIR/cloudflared"
-CONF="$DIR/config.json"
-
-TOKEN=$1
-
 while true; do
-    pgrep -f "sing-box" >/dev/null || nohup $SB run -c $CONF > $DIR/sb.log 2>&1 &
-    
-    if [ -z "$TOKEN" ]; then
-        pgrep -f "cloudflared tunnel --url" >/dev/null || nohup $CF tunnel --url http://localhost:10000 > $DIR/cf.log 2>&1 &
-    else
-        pgrep -f "cloudflared tunnel run" >/dev/null || nohup $CF tunnel run --token $TOKEN > $DIR/cf.log 2>&1 &
-    fi
-
-    sleep 10
+ pgrep sing-box >/dev/null || nohup $DIR/sing-box run -c $DIR/config.json > $DIR/sb.log 2>&1 &
+ pgrep cloudflared >/dev/null || nohup $DIR/cloudflared tunnel --url http://localhost:10000 > $DIR/cf.log 2>&1 &
+ sleep 10
 done
 EOF
-
 chmod +x $WORK_DIR/keep.sh
 }
 
 parse_domain() {
-    for i in {1..10}; do
+    for i in {1..15}; do
         DOMAIN=$(grep -o 'https://.*trycloudflare.com' $LOG_CF | tail -1)
         [ -n "$DOMAIN" ] && break
         sleep 1
     done
 }
 
-output_node() {
-    UUID=$(cat $WORK_DIR/uuid.txt)
+show_node() {
+    UUID=$(cat $WORK_DIR/uuid.txt 2>/dev/null)
     parse_domain
 
     echo
-    echo -e "${green}========= 节点信息 =========${plain}"
+    echo -e "${green}========= 节点 =========${plain}"
     echo "地址: $DOMAIN"
-    echo "端口: 443"
     echo "UUID: $UUID"
-    echo "传输: WS"
-    echo "路径: /ws"
-    echo "TLS: 开"
     echo
 
-    echo "👉 v2rayN / v2rayNG 手动填入即可"
-    echo "👉 或复制下面链接导入："
-    echo
-    echo "vless://$UUID@${DOMAIN#https://}:443?encryption=none&security=tls&type=ws&host=${DOMAIN#https://}&path=%2Fws#NAT-CF"
-    echo -e "${green}============================${plain}"
+    LINK="vless://$UUID@${DOMAIN#https://}:443?encryption=none&security=tls&type=ws&host=${DOMAIN#https://}&path=%2Fws#NAT"
+    echo "$LINK"
+    echo -e "${green}========================${plain}"
 }
 
 start_temp() {
-    print_doing "启动服务（临时隧道）"
-
     pkill -f sing-box
     pkill -f cloudflared
 
+    print_do "启动服务"
     nohup $SB run -c $CONF > $WORK_DIR/sb.log 2>&1 &
     sleep 2
     nohup $CF tunnel --url http://localhost:10000 > $LOG_CF 2>&1 &
 
-    nohup bash $WORK_DIR/keep.sh > /dev/null 2>&1 &
+    nohup bash $WORK_DIR/keep.sh >/dev/null 2>&1 &
 
     sleep 3
-    print_step "启动完成"
-    output_node
-}
-
-start_token() {
-    read -p "输入 CF Token: " TOKEN
-
-    print_doing "启动服务（Token 模式）"
-
-    pkill -f sing-box
-    pkill -f cloudflared
-
-    nohup $SB run -c $CONF > $WORK_DIR/sb.log 2>&1 &
-    sleep 2
-    nohup $CF tunnel run --token $TOKEN > $LOG_CF 2>&1 &
-
-    nohup bash $WORK_DIR/keep.sh $TOKEN > /dev/null 2>&1 &
-
-    print_step "启动完成"
-    echo "👉 使用你自己的域名访问"
-}
-
-show_info() {
-    output_node
+    print_ok "启动完成"
+    show_node
 }
 
 diagnose() {
-    echo "=== 运行状态 ==="
+    echo "=== 状态 ==="
     pgrep -af sing-box || echo "sing-box 未运行"
     pgrep -af cloudflared || echo "cloudflared 未运行"
-
     echo
-    echo "=== 最新日志 ==="
     tail -n 20 $LOG_CF
 }
 
@@ -169,43 +137,29 @@ uninstall_all() {
     pkill -f sing-box
     pkill -f cloudflared
     rm -rf $WORK_DIR
-    print_step "已彻底卸载"
+    print_ok "已卸载"
 }
 
-menu() {
+menu(){
 clear
 echo -e "${green}
-================================
- NAT 专用 CF + sing-box 面板
-================================
-1. 部署 Token 模式（稳定）
-2. 部署 临时隧道（推荐 NAT）
-3. 查看节点信息
-4. 链路诊断
-5. 卸载
-6. 退出
-================================
+====== NAT 专用 CF + sing-box 面板 ======
+1. 一键部署（临时隧道）
+2. 查看节点
+3. 诊断
+4. 卸载
+5. 退出
+============================
 ${plain}"
-read -p "请选择: " num
 
-case "$num" in
-1)
-install_core
-gen_config
-create_keep
-start_token
-;;
-2)
-install_core
-gen_config
-create_keep
-start_temp
-;;
-3) show_info ;;
-4) diagnose ;;
-5) uninstall_all ;;
-6) exit ;;
-*) echo "无效输入" ;;
+read -p "选择: " n
+case $n in
+1) install_core && gen_config && create_keep && start_temp ;;
+2) show_node ;;
+3) diagnose ;;
+4) uninstall_all ;;
+5) exit ;;
+*) echo "错误输入" ;;
 esac
 
 read -p "回车继续"
