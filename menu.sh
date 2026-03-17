@@ -34,21 +34,69 @@ file sb.zip | grep -q "Zip archive" || return 1
 install_core() {
 mkdir -p $WORK_DIR && cd $WORK_DIR
 
-if ! download_sb; then
-    err "sing-box 下载失败"
+echo "[➜] 安装 sing-box（多源尝试）..."
+
+URLS=(
+"https://ghfast.top/https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-amd64.zip"
+"https://ghproxy.com/https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-amd64.zip"
+"https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-amd64.zip"
+)
+
+SUCCESS=0
+
+for url in "${URLS[@]}"; do
+    echo "尝试: $url"
+    curl -L --connect-timeout 10 --max-time 60 -o sb.zip "$url"
+
+    SIZE=$(stat -c%s sb.zip 2>/dev/null || echo 0)
+
+    if [ "$SIZE" -gt 1000000 ]; then
+        SUCCESS=1
+        break
+    else
+        echo "下载异常，换源..."
+    fi
+done
+
+if [ "$SUCCESS" -ne 1 ]; then
+    echo "[✘] sing-box 下载失败（网络完全不通）"
     return 1
 fi
 
-unzip -o sb.zip >/dev/null
-mv sing-box*/sing-box $SB
+unzip -o sb.zip >/dev/null 2>&1 || {
+    echo "[✘] 解压失败"
+    return 1
+}
+
+mv sing-box*/sing-box $SB 2>/dev/null
 chmod +x $SB
 rm -rf sb.zip sing-box*
-ok "sing-box OK"
 
-doit "下载 cloudflared"
-curl -L --retry 3 -o $CF https://ghfast.top/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+echo "[✔] sing-box 安装完成"
+
+echo "[➜] 安装 cloudflared..."
+
+CF_URLS=(
+"https://ghfast.top/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+"https://ghproxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+)
+
+for url in "${CF_URLS[@]}"; do
+    echo "尝试: $url"
+    curl -L --connect-timeout 10 --max-time 60 -o $CF "$url"
+
+    SIZE=$(stat -c%s $CF 2>/dev/null || echo 0)
+
+    if [ "$SIZE" -gt 5000000 ]; then
+        break
+    else
+        echo "下载异常，换源..."
+    fi
+done
+
 chmod +x $CF
-ok "cloudflared OK"
+echo "[✔] cloudflared 安装完成"
 }
 
 # ================= 配置 =================
